@@ -1,3 +1,5 @@
+import asyncio
+
 from fastapi import FastAPI
 import connector
 
@@ -8,7 +10,7 @@ C = "http://svc-c-cont:8080"
 
 async def ingest(ip):
     ip = connector.ValidateIp(ip)
-    geo = await connector.MakeRequest(f"{C}/lookup/{ip}", 4, "ServiceC")
+    geo = await connector.MakeRequest(f"{C}/lookup/{ip}", 70, "ServiceC")
     return await connector.MakeRequest(
         f"{B}/AddIp", 8, "ServiceB-AddIp", meth="POST", JsonData=geo
     )
@@ -31,7 +33,7 @@ async def AddIp(ip: str):
 
 @app.post("/resolve-ip-list")
 async def AddList(ips: list[str]):
-    return [await ingest(ip) for ip in ips]
+    return list(await asyncio.gather(*(ingest(ip) for ip in ips)))
 
 
 @app.get("/delete/{iid}")
