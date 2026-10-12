@@ -148,7 +148,8 @@ async def lookup_ip(ip: str) -> dict:
         while len(skipped) < len(ORDER):
             now = time.monotonic()
             async with lock:
-                choice = next((p for p in ORDER if p.name not in skipped and p.ready(now)), None)
+                open_ones = [p for p in ORDER if p.name not in skipped and p.ready(now)]
+                choice = max(open_ones, key=lambda p: p.limit - p.used, default=None)
                 if choice:
                     choice.take(now)
                 else:
