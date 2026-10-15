@@ -30,12 +30,19 @@ class Provider(BaseModel):
     window: float
     used: int = 0
     reset_at: float = 0.0
+    window_start: float = 0.0
     cooldown_until: float = 0.0
 
     def _roll(self, now: float) -> None:
         if now >= self.reset_at:
             self.used = 0
+            self.window_start = now
             self.reset_at = now + self.window
+
+    def ttl_left(self, now: float) -> int:
+        if self.window_start <= 0:
+            return int(self.window)
+        return max(0, int(self.window - (now - self.window_start)))
 
     def ready(self, now: float) -> bool:
         self._roll(now)
@@ -108,10 +115,11 @@ class IpApi(Provider):
         )
 
     def note(self, headers, now: float) -> None:
-        rl, ttl = headers.get("X-Rl"), headers.get("X-Ttl")
+        rl = self.limit - self.used
+        ttl = self.ttl_left(now)
         print(f"X-Rl={rl} X-Ttl={ttl}")
-        if rl == "0":
-            self.cooldown_until = now + float(ttl or 0)
+        if rl == 0:
+            self.cooldown_until = now + ttl
 
 
 FREE = FreeIpApi()
