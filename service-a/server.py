@@ -1,9 +1,19 @@
 import asyncio
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 import connector
+import signin
 
-app = FastAPI()
+
+@asynccontextmanager
+async def lifespan(_app):
+    await signin.start()
+    yield
+    await signin.stop()
+
+
+app = FastAPI(lifespan=lifespan)
 B = "http://svc-b-cont:8080"
 C = "http://svc-c-cont:8080"
 
@@ -34,6 +44,12 @@ async def AddIp(ip: str):
 @app.post("/resolve-ip-list")
 async def AddList(ips: list[str]):
     return list(await asyncio.gather(*(ingest(ip) for ip in ips)))
+
+
+@app.post("/signin")
+async def sign_in(body: signin.SignIn):
+    await signin.publish(body)
+    return {"message": "your request was received"}
 
 
 @app.get("/delete/{iid}")

@@ -1,8 +1,8 @@
 # Project Coordinates
 
-Three FastAPI services that resolve IP addresses, store their geolocation, and group nearby records into clusters.
+Three FastAPI services that resolve IP addresses, store their geolocation, and group nearby records into clusters. A sign-in request on Service A is published to Kafka. A separate consumer asks Service B whether that email is new.
 
-Service A is the entry point. It validates an IP, asks Service C for coordinates, and stores the result on Service B. Service B keeps the records in memory and builds geographic clusters. Service C is the only service that calls the external geolocation providers.
+Service A is the entry point. It validates an IP, asks Service C for coordinates, and stores the result on Service B. Service B keeps the records in memory and builds geographic clusters. Service C is the only service that calls the external geolocation providers. Sign-in does not call Service C and does not create a cluster point.
 
 ## Architecture
 
@@ -18,9 +18,20 @@ curl ──▶ Service A :8081
                      ▼
               Service B :8082  (in-memory store + clusters)
               Service C :8083  (provider switch + lookup)
+
+curl ──▶ POST Service A /signin
+            │  pydantic: email, optional password, ip-address
+            │  skip publish when this IP was published in the last 60 seconds
+            ▼
+         kafka-broker  topic user-gateway
+            │
+            ▼
+         kafka-consumer  (group user-gateway-group)
+            ├── GET  svc-b-cont:8080/user/{email}
+            └── POST svc-b-cont:8080/user     only when the email is new
 ```
 
-Every container listens on port **8080**. Host ports are different so they do not collide: A is 8081, B is 8082, C is 8083.
+Services A, B, and C listen on port **8080**. Host ports are different so they do not collide: A is 8081, B is 8082, C is 8083. Kafka listens on **9092** inside the Docker network.
 
 ## Layout
 
@@ -28,8 +39,9 @@ Every container listens on port **8080**. Host ports are different so they do no
 servers-submission/
 ├── docker-compose.yml
 ├── ips.json                 # sample body for POST /resolve-ip-list
-├── service-a/               # gateway: validate, then call C and B
-├── service-b/               # memory, CRUD, geographic clusters
+├── service-a/               # gateway: validate, then call C and B; POST /signin
+├── service-b/               # memory, CRUD, geographic clusters, user store
+├── kafka-consumer/          # user-gateway subscriber
 └── service-c/
     ├── server.py            # GET /lookup/{ip}
     └── providers.py         # both providers, quotas, shared record shape
@@ -76,8 +88,9 @@ Both JSON shapes are stored as the same record: `ipAddress`, `latitude`, `longit
 | GET | `/resolve-ip/{ip}` | Validate one IP, look it up, store it |
 | POST | `/resolve-ip-list` | JSON array of IPs; each is validated and stored the same way |
 | GET | `/delete/{id}` | Delete one record by id |
+| POST | `/signin` | Validate a sign-in and publish it to `user-gateway` |
 
-A malformed IP returns **400**.
+A malformed IP returns **400**. `POST /signin` takes `email` (required), `password` (optional), and `ip-address` (required). A valid body returns `{"message": "your request was received"}`. The same IP is not published again for 60 seconds. An invalid body returns **422**. If Kafka rejects the publish, the response is **503**.
 
 ### Service B — `http://127.0.0.1:8082`
 
@@ -87,6 +100,10 @@ A malformed IP returns **400**.
 | POST | `/AddIp` | Store one geo record. Duplicate IPs are rejected |
 | DELETE | `/delete/{id}` | Delete one record and update its cluster |
 | GET | `/generate-geo-clusters` | Clusters of geographically close records |
+| GET | `/user/{email}` | Whether this email is already stored |
+| POST | `/user` | Write the user when the email is new |
+
+`GET /user/{email}` returns `{"exists": true}` or `{"exists": false}`. `POST /user` returns `{"success": true, "case": "signup"}` when it writes, and `{"success": false, "case": "signin"}` when the email is already there. Users are a separate in-memory map from the IP records.
 
 `/AddIp` is POST only. Opening it in a browser sends GET and returns `Method Not Allowed`.
 
@@ -112,7 +129,16 @@ Each new record joins the nearest cluster when its Euclidean distance to that cl
 }
 ```
 
-Memory is lost when the Service B container restarts. Provider quotas reset when the Service C container restarts.
+Memory is lost when the Service B container restarts, including users. Provider quotas reset when the Service C container restarts. Kafka logs stay in the `kafka-data` volume.
+
+## Sign-in events
+
+`kafka-init` creates the topic `user-gateway` (1 partition, replication factor 1) after the broker is healthy, then exits. `kafka-consumer` reads that topic as group `user-gateway-group`. The first time an email appears, the consumer logs `signup` and Service B stores `email`, `password`, and `ip-address`. A later event for the same email logs `signin` and does not write again.
+
+Two more subscribers can read the same topic. Each needs its own group id, so it receives every event while `user-gateway-group` keeps doing signup and signin. They are examples, not extra containers.
+
+- **Audit subscriber**, group `user-gateway-audit`. Append each event to a log: email, ip-address, offset, and time. It does not call Service B.
+- **Geo subscriber**, group `user-gateway-geo`. On signup only, call `GET svc-c-cont:8080/lookup/{ip}` and `POST svc-b-cont:8080/AddIp`, so that sign-in IP joins the existing coordinate clusters.
 
 ## Examples
 
@@ -124,6 +150,13 @@ curl.exe -X POST "http://127.0.0.1:8081/resolve-ip-list" -H "Content-Type: appli
 curl.exe "http://127.0.0.1:8081/"
 curl.exe "http://127.0.0.1:8082/generate-geo-clusters"
 curl.exe "http://127.0.0.1:8081/delete/RECORD_ID"
+
+Set-Content -Path signin.json -Value '{"email":"a@b.com","ip-address":"8.8.8.8"}' -Encoding ascii
+curl.exe -X POST "http://127.0.0.1:8081/signin" -H "Content-Type: application/json" --data-binary "@signin.json"
+Set-Content -Path signin.json -Value '{"email":"a@b.com","password":"x","ip-address":"1.1.1.1"}' -Encoding ascii
+curl.exe -X POST "http://127.0.0.1:8081/signin" -H "Content-Type: application/json" --data-binary "@signin.json"
+docker logs kafka-consumer
+curl.exe "http://127.0.0.1:8082/user/a@b.com"
 ```
 
 `ips.json` must exist in the folder where you run curl. A sample file is included:
