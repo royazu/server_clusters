@@ -1,6 +1,7 @@
 from fastapi import FastAPI
 from memory import IpMemory
 from cluster import GeoClusters
+from users import UserMemory
 
 app = FastAPI()
 
@@ -35,6 +36,19 @@ async def delete(iid):
         "success": True,
         "data_length": await IpMemory.aquireTheLock(IpMemory.lengthofData),
     }
+
+
+@app.get("/user/{email}")
+async def get_user(email: str):
+    return {"exists": await UserMemory.aquireTheLock(UserMemory.exists, email)}
+
+
+@app.post("/user")
+async def add_user(body: dict):
+    wrote = await UserMemory.aquireTheLock(UserMemory.add, body)
+    if wrote:
+        return {"success": True, "case": "signup"}
+    return {"success": False, "case": "signin"}
 
 
 @app.get("/generate-geo-clusters")
